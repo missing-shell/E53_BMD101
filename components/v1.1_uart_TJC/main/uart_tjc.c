@@ -9,7 +9,7 @@
 #include "esp_log.h"           // Include the ESP-IDF log library
 #include "uart_tjc.h"
 
-static const char *BH1750_TAG = "UART"; // Initialize the log tag
+static const char *TAG = "UART"; // Initialize the log tag
 static void echo_task(void *arg) // Define the echo task function
 {
     /* Configure parameters of an UART driver,
@@ -44,7 +44,7 @@ static void echo_task(void *arg) // Define the echo task function
         if (len)
         {                                                      // If data was read
             data[len] = '\0';                                  // Null-terminate the data
-            ESP_LOGI(BH1750_TAG, "Recv       str: %s", (char *)data); // Log the received data
+            ESP_LOGI(TAG, "Recv       str: %s", (char *)data); // Log the received data
         }
     }
 }

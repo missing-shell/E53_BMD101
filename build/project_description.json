@@ -1,7 +1,7 @@
 {
     "version":            "1",
     "project_name":       "E53_BMD101",
-    "project_version":    "1",
+    "project_version":    "eaf4807-dirty",
     "project_path":       "E:/All_Project/ESP32/E53_BMD101",
     "idf_path":           "E:/Espressif/v5.1.1/esp-idf",
     "build_dir":          "E:/All_Project/ESP32/E53_BMD101/build",
@@ -790,7 +790,7 @@
             "managed_reqs": [],
             "managed_priv_reqs": [],
             "file": "E:/All_Project/ESP32/E53_BMD101/build/esp-idf/main/libmain.a",
-            "sources": [ "E:/All_Project/ESP32/E53_BMD101/main/main.c" ],
+            "sources": [ "E:/All_Project/ESP32/E53_BMD101/main/bm101_uart.c", "E:/All_Project/ESP32/E53_BMD101/main/main.c" ],
             "include_dirs": [ "." ]
         },
         "mbedtls": {
