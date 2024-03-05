@@ -48,7 +48,7 @@ static void echo_task(void *arg)  // Define the echo task function
             data[len] = '\0'; // Null-terminate the data
             for (int i = 0; i < len; i++)
             {
-                ESP_LOGI(TAG, "%02X ", data[i]);
+                ESP_LOGI(TAG, "%02X ", data[i]); // 需要解决看门狗超时问题
             }
         }
     }
