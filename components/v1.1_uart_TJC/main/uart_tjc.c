@@ -49,7 +49,7 @@ static void echo_task(void *arg) // Define the echo task function
     }
 }
 
-void uart_task_create(void) // Define the main application function
+void uart_evnet_task_create(void) // Define the main application function
 {
     xTaskCreate(echo_task, "uart_echo_task", UART_TASK_STACK_SIZE, NULL, 10, NULL); // Create the echo task
 }
