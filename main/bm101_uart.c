@@ -10,16 +10,21 @@
 #define BM101_BAND (57600)
 #define BM1O1_TX (5)
 #define BM101_RX (4)
-#define UART_BUF_SIZE (4096)
+#define UART_BUF_SIZE (2048)
 
-#define SYNC_BYTE 0xAA    // [SYNC]字节
-#define PATTERN_CHR_NUM 2 // 模式字符的数量
-#define CHR_TOUT (10)
-#define PRE_IDLE (10)
-static QueueHandle_t uart1_queue;
-static const char *TAG = "BM101"; // Initialize the log tag
+#define SYNC_BYTE 0xAA // [SYNC]字节
+#define EXCODE 0x80    // 假设EXCODE是一个宏定义，表示扩展代码
 
-static void backup(void);
+static uint8_t Uart2_Buffer[UART_BUF_SIZE]; // Receive buffer
+static uint8_t Uart2_Rx = 0;                // Uart2_Buffer index
+static uint8_t Uart2_Len;                   // Data length (including CRC after the third byte)
+static int checksum = 0;                    // Checksum calculated from the payload
+static uint8_t Uart2_Sta = 0;               // Data frame correct flag
+static uint8_t Uart2_check;                 // Checksum at the end of the frame
+static uint8_t sig_quality = 200;           // Signal quality
+static const char *TAG = "BM101";           // Initialize the log tag
+
+static void parse_payload();
 
 static void uart_event_init(void) // Define the echo task function
 {
@@ -35,106 +40,145 @@ static void uart_event_init(void) // Define the echo task function
     };
     int intr_alloc_flags = 0; // Define the interrupt allocation flags
 
-    ESP_ERROR_CHECK(uart_driver_install(UART_PORT_NUM, UART_BUF_SIZE * 2, UART_BUF_SIZE * 2, 20, &uart1_queue, 0)); // Install the UART driver
-    ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));                                                // Configure the UART parameters
-    ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, BM1O1_TX, BM101_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));       // Set the UART pins
-
-    // Set uart pattern detect function.
-    uart_enable_pattern_det_baud_intr(UART_PORT_NUM, SYNC_BYTE, PATTERN_CHR_NUM, CHR_TOUT, 0, PRE_IDLE);
-    // Reset the pattern queue length to record at most 20 pattern positions.
-    uart_pattern_queue_reset(UART_PORT_NUM, 100);
+    ESP_ERROR_CHECK(uart_driver_install(UART_PORT_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, intr_alloc_flags));     // Install the UART driver
+    ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));                                          // Configure the UART parameters
+    ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, BM1O1_TX, BM101_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE)); // Set the UART pins
 }
 
 static void uart_event_task(void *pvParameters)
 {
-    uart_event_t event;
-    size_t buffered_size;
-    uint8_t *dtmp = (uint8_t *)malloc(UART_BUF_SIZE);
-    for (;;)
+    while (1)
     {
-        // Waiting for UART event.
-        if (xQueueReceive(uart1_queue, (void *)&event, (TickType_t)portMAX_DELAY))
+        uint8_t data;
+        int len = uart_read_bytes(UART_PORT_NUM, &data, 1, 20 / portTICK_PERIOD_MS);
+        if (len)
         {
-            bzero(dtmp, UART_BUF_SIZE);
-            ESP_LOGI(TAG, "uart[%d] event:", UART_PORT_NUM);
-            switch (event.type)
-            {
-            // Event of UART receving data
-            /*We'd better handler data event fast, there would be much more data events than
-            other types of events. If we take too much time on data event, the queue might
-            be full.*/
-            case UART_DATA:
-                ESP_LOGI(TAG, "[UART DATA]: %d", event.size);
-                uart_read_bytes(UART_PORT_NUM, dtmp, event.size, portMAX_DELAY);
-                backup();
+            Uart2_Buffer[Uart2_Rx] = data;
+            Uart2_Rx++;
 
-                break;
-            // Event of UART RX break detected
-            case UART_BREAK:
-                ESP_LOGI(TAG, "uart rx break");
-                break;
-            // Event of UART parity check error
-            case UART_PARITY_ERR:
-                ESP_LOGI(TAG, "uart parity error");
-                break;
-            // Event of UART frame error
-            case UART_FRAME_ERR:
-                ESP_LOGI(TAG, "uart frame error");
-                break;
-            // UART_PATTERN_DET
-            case UART_PATTERN_DET:
-                uart_get_buffered_data_len(UART_PORT_NUM, &buffered_size);
-                int pos = uart_pattern_pop_pos(UART_PORT_NUM);
-                ESP_LOGI(TAG, "[UART PATTERN DETECTED] pos: %d, buffered size: %d", pos, buffered_size);
-                if (pos == -1)
-                {
-                    // There used to be a UART_PATTERN_DET event, but the pattern position queue is full so that it can not
-                    // record the position. We should set a larger queue size.
-                    // As an example, we directly flush the rx buffer here.
-                    uart_flush_input(UART_PORT_NUM);
+            if (Uart2_Rx < 3)
+            { // Check if the frame header is received
+                if (Uart2_Buffer[Uart2_Rx - 1] != SYNC_BYTE)
+                {                  // Exception
+                    Uart2_Rx = 0;  // Reset index
+                    Uart2_Sta = 0; // Reset flag
+                }
+            }
+            else if (Uart2_Rx == 3)
+            { // Get payload length
+                Uart2_Len = Uart2_Buffer[Uart2_Rx - 1];
+            }
+            else if (Uart2_Rx < 4 + Uart2_Len)
+            {                                           // Receive payload
+                checksum += Uart2_Buffer[Uart2_Rx - 1]; // Calculate checksum
+            }
+            else
+            { // Receive checksum
+                Uart2_check = Uart2_Buffer[Uart2_Rx - 1];
+                checksum &= 0xFF;
+                checksum = ~checksum & 0xFF;
+                if (checksum != Uart2_check)
+                {                  // Checksum error, discard the packet
+                    Uart2_Rx = 0;  // Reset index
+                    Uart2_Sta = 0; // Reset flag
+                    checksum = 0;
                 }
                 else
                 {
-                    backup();
+                    Uart2_Sta = 1; // Receive complete
                 }
-                break;
-            // Others
-            default:
-                ESP_LOGI(TAG, "uart event type: %d", event.type);
-                break;
+            }
+
+            if (Uart2_Sta)
+            {                    // Detect flag, indicating successful reception
+                parse_payload(); // Call data parsing function
+                Uart2_Rx = 0;    // Reset index
+                Uart2_Sta = 0;   // Reset flag
+                checksum = 0;
             }
         }
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
-    free(dtmp);
-    dtmp = NULL;
     vTaskDelete(NULL);
 }
 
-void uart_evnet_task_create(void)
+void drawCurve(short int rawValue)
+{
+    // 在这里实现绘制曲线的逻辑
+    ESP_LOGI("BM101", "Drawing curve with raw value: %d", rawValue);
+}
+
+void LCD_Clear(int color)
+{
+    // 在这里实现清屏的逻辑
+    ESP_LOGI("BM101", "Clearing LCD with color: %d", color);
+}
+
+void LCD_ShowNum(int x, int y, int num, int len, int size)
+{
+    // 在这里实现显示数字的逻辑
+    ESP_LOGI("BM101", "Showing number %d at (%d, %d) with length %d and size %d", num, x, y, len, size);
+}
+
+static void parse_payload(void)
+{
+    uint8_t bytesParsed = 0; // 已处理的字节数
+    uint8_t code;
+    uint8_t length; // 当前DataRow包含的Value的字节数
+    uint8_t extendedCodeLevel;
+    short int rawValue = 0; // 心电数据
+
+    while (bytesParsed < Uart2_Len)
+    {
+        extendedCodeLevel = 0;
+        while (Uart2_Buffer[3 + bytesParsed] == EXCODE)
+        {
+            extendedCodeLevel++;
+            bytesParsed++;
+        }
+        code = Uart2_Buffer[3 + bytesParsed];
+        bytesParsed++;
+        if (code >= 0x80)
+        {
+            length = Uart2_Buffer[3 + bytesParsed];
+            bytesParsed++;
+        }
+        else
+        {
+            length = 1;
+        }
+        // 现在我们获得了ExCodeLevel, code和DataValue的长度
+        // 实际上，扩展代码级别总是0，所以我们可以忽略它
+        switch (code)
+        {
+        case 0x80: // 两字节有符号的原始波形值，大端字节序
+            if (sig_quality > 0)
+            {
+                rawValue = Uart2_Buffer[3 + bytesParsed];
+                rawValue <<= 8;
+                rawValue |= Uart2_Buffer[4 + bytesParsed];
+                drawCurve(rawValue);
+            }
+            else
+            {
+                LCD_Clear(1); // 信号质量不佳，清屏
+            }
+            break;
+        case 0x02:
+            // 一字节的信号质量数据，0表示质量差，200表示质量好
+            sig_quality = Uart2_Buffer[3 + bytesParsed];
+            break;
+        case 0x03:                                                      // 一字节的心率值数据
+            LCD_ShowNum(290, 50, Uart2_Buffer[3 + bytesParsed], 2, 12); // 在屏幕上显示心率值
+            break;
+        }
+        bytesParsed += length;
+    }
+}
+
+void uart_task_create(void)
 {
     uart_event_init();
     // Create a task to handler UART event from ISR
-    xTaskCreate(uart_event_task, "uart_event_task", 2048, NULL, 12, NULL);
-}
-
-static void backup(void)
-{
-    // Configure a temporary buffer for the incoming data
-    uint8_t *data = (uint8_t *)malloc(UART_BUF_SIZE); // Allocate memory for the data buffer
-    printf("--------------------BM101_BAND=%d-------------------\n", BM101_BAND);
-    while (1)
-    {
-        // Read data from the UART
-        int length = 0;
-        ESP_ERROR_CHECK(uart_get_buffered_data_len(UART_PORT_NUM, (size_t *)&length));
-        int len = uart_read_bytes(UART_PORT_NUM, data, (UART_BUF_SIZE - 1), 20 / portTICK_PERIOD_MS); // Read bytes from the UART
-        if (len)
-        {                     // If data was read
-            data[len] = '\0'; // Null-terminate the data
-            for (int i = 0; i < len; i++)
-            {
-                ESP_LOGI(TAG, "%02X ", data[i]); // 需要解决看门狗超时问题
-            }
-        }
-    }
+    xTaskCreate(uart_event_task, "uart_event_task", 2048, NULL, 10, NULL);
 }
