@@ -10,19 +10,13 @@
 #define BM101_BAND (57600)
 #define BM1O1_TX (5)
 #define BM101_RX (4)
-#define UART_BUF_SIZE (2048)
+#define UART_PORT_NUM (1) // 使用UART1
 
-#define SYNC_BYTE 0xAA // [SYNC]字节
-#define EXCODE 0x80    // 假设EXCODE是一个宏定义，表示扩展代码
+#define UART_BUF_SIZE (256)
+#define SYNC 0xAA
+#define EXCODE 0x55
 
-static uint8_t Uart2_Buffer[UART_BUF_SIZE]; // Receive buffer
-static uint8_t Uart2_Rx = 0;                // Uart2_Buffer index
-static uint8_t Uart2_Len;                   // Data length (including CRC after the third byte)
-static int checksum = 0;                    // Checksum calculated from the payload
-static uint8_t Uart2_Sta = 0;               // Data frame correct flag
-static uint8_t Uart2_check;                 // Checksum at the end of the frame
-static uint8_t sig_quality = 200;           // Signal quality
-static const char *TAG = "BM101";           // Initialize the log tag
+static const char *TAG = "BM101"; // Initialize the log tag
 
 static void parse_payload();
 
@@ -45,135 +39,106 @@ static void uart_event_init(void) // Define the echo task function
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, BM1O1_TX, BM101_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE)); // Set the UART pins
 }
 
-static void uart_event_task(void *pvParameters)
+static void parsePayload(unsigned char *payload, unsigned char pLength)
 {
-    while (1)
+    unsigned char bytesParsed = 0;
+    unsigned char code;
+    unsigned char length;
+    unsigned char extendedCodeLevel;
+    int i;
+    /* 循环，直到从payload[]数组中解析出所有字节... */
+    while (bytesParsed < pLength)
     {
-        uint8_t data;
-        int len = uart_read_bytes(UART_PORT_NUM, &data, 1, 20 / portTICK_PERIOD_MS);
-        if (len)
-        {
-            Uart2_Buffer[Uart2_Rx] = data;
-            Uart2_Rx++;
-
-            if (Uart2_Rx < 3)
-            { // Check if the frame header is received
-                if (Uart2_Buffer[Uart2_Rx - 1] != SYNC_BYTE)
-                {                  // Exception
-                    Uart2_Rx = 0;  // Reset index
-                    Uart2_Sta = 0; // Reset flag
-                }
-            }
-            else if (Uart2_Rx == 3)
-            { // Get payload length
-                Uart2_Len = Uart2_Buffer[Uart2_Rx - 1];
-            }
-            else if (Uart2_Rx < 4 + Uart2_Len)
-            {                                           // Receive payload
-                checksum += Uart2_Buffer[Uart2_Rx - 1]; // Calculate checksum
-            }
-            else
-            { // Receive checksum
-                Uart2_check = Uart2_Buffer[Uart2_Rx - 1];
-                checksum &= 0xFF;
-                checksum = ~checksum & 0xFF;
-                if (checksum != Uart2_check)
-                {                  // Checksum error, discard the packet
-                    Uart2_Rx = 0;  // Reset index
-                    Uart2_Sta = 0; // Reset flag
-                    checksum = 0;
-                }
-                else
-                {
-                    Uart2_Sta = 1; // Receive complete
-                }
-            }
-
-            if (Uart2_Sta)
-            {                    // Detect flag, indicating successful reception
-                parse_payload(); // Call data parsing function
-                Uart2_Rx = 0;    // Reset index
-                Uart2_Sta = 0;   // Reset flag
-                checksum = 0;
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
-    vTaskDelete(NULL);
-}
-
-void drawCurve(short int rawValue)
-{
-    // 在这里实现绘制曲线的逻辑
-    ESP_LOGI("BM101", "Drawing curve with raw value: %d", rawValue);
-}
-
-void LCD_Clear(int color)
-{
-    // 在这里实现清屏的逻辑
-    ESP_LOGI("BM101", "Clearing LCD with color: %d", color);
-}
-
-void LCD_ShowNum(int x, int y, int num, int len, int size)
-{
-    // 在这里实现显示数字的逻辑
-    ESP_LOGI("BM101", "Showing number %d at (%d, %d) with length %d and size %d", num, x, y, len, size);
-}
-
-static void parse_payload(void)
-{
-    uint8_t bytesParsed = 0; // 已处理的字节数
-    uint8_t code;
-    uint8_t length; // 当前DataRow包含的Value的字节数
-    uint8_t extendedCodeLevel;
-    short int rawValue = 0; // 心电数据
-
-    while (bytesParsed < Uart2_Len)
-    {
+        /* 解析扩展代码级别、代码和长度 */
         extendedCodeLevel = 0;
-        while (Uart2_Buffer[3 + bytesParsed] == EXCODE)
+        while (payload[bytesParsed] == EXCODE)
         {
             extendedCodeLevel++;
             bytesParsed++;
         }
-        code = Uart2_Buffer[3 + bytesParsed];
-        bytesParsed++;
-        if (code >= 0x80)
+        code = payload[bytesParsed++];
+        if (code & 0x80)
         {
-            length = Uart2_Buffer[3 + bytesParsed];
-            bytesParsed++;
+            length = payload[bytesParsed++];
         }
         else
         {
             length = 1;
         }
-        // 现在我们获得了ExCodeLevel, code和DataValue的长度
-        // 实际上，扩展代码级别总是0，所以我们可以忽略它
-        switch (code)
+        /* 根据扩展代码级别、代码、长度和[CODE]定义表，适当地处理有效载荷中的下一个“长度”字节的数据。 */
+        ESP_LOGI("parsePayload", "EXCODE级别: %d 代码: 0x%02X 长度: %d",
+                 extendedCodeLevel, code, length);
+        ESP_LOGI("parsePayload", "数据值(s):");
+        for (i = 0; i < length; i++)
         {
-        case 0x80: // 两字节有符号的原始波形值，大端字节序
-            if (sig_quality > 0)
-            {
-                rawValue = Uart2_Buffer[3 + bytesParsed];
-                rawValue <<= 8;
-                rawValue |= Uart2_Buffer[4 + bytesParsed];
-                drawCurve(rawValue);
-            }
-            else
-            {
-                LCD_Clear(1); // 信号质量不佳，清屏
-            }
-            break;
-        case 0x02:
-            // 一字节的信号质量数据，0表示质量差，200表示质量好
-            sig_quality = Uart2_Buffer[3 + bytesParsed];
-            break;
-        case 0x03:                                                      // 一字节的心率值数据
-            LCD_ShowNum(290, 50, Uart2_Buffer[3 + bytesParsed], 2, 12); // 在屏幕上显示心率值
-            break;
+            ESP_LOGI("parsePayload", " %02X", payload[bytesParsed + i] & 0xFF);
         }
+        ESP_LOGI("parsePayload", "\n");
+        /* 按数据值的长度增加bytesParsed */
         bytesParsed += length;
     }
+}
+
+static void uart_event_task(void *pvParameters)
+{
+    uint8_t *data = (uint8_t *)malloc(UART_BUF_SIZE + 1);
+    while (1)
+    {
+        // 不断读取新的字节，知道读到[SYNC]时才执行下一步
+        int len = uart_read_bytes(UART_PORT_NUM, data, 1, 20 / portTICK_PERIOD_MS);
+        while (len > 0 && data[0] != SYNC)
+        {
+            len = uart_read_bytes(UART_PORT_NUM, data, 1, 20 / portTICK_PERIOD_MS);
+        }
+
+        // 读取下一个字节的值，确保其为[SYNC]
+        len = uart_read_bytes(UART_PORT_NUM, data + 1, 1, 20 / portTICK_PERIOD_MS);
+        if (len > 0 && data[1] != SYNC)
+        {
+            continue; // 如果不是[SYNC]，返回第一步
+        }
+
+        // 读取下一个字节，将其视作[PLENGTH]
+        len = uart_read_bytes(UART_PORT_NUM, data + 2, 1, 20 / portTICK_PERIOD_MS);
+        if (len > 0)
+        {
+            int pLength = data[2];
+            // 如果[PLENGTH]是 170（[SYNC]）,重复第 3 步
+            while (pLength == 170)
+            {
+                len = uart_read_bytes(UART_PORT_NUM, data + 2, 1, 20 / portTICK_PERIOD_MS);
+                pLength = data[2];
+            }
+            // 如果[PLENGTH]比 170 大，返回第一步（PLENGTH 太大）
+            if (pLength > 169)
+            {
+                continue; // 返回第一步
+            }
+
+            // 读取剩余的数据载荷
+            len = uart_read_bytes(UART_PORT_NUM, data + 3, pLength, 20 / portTICK_PERIOD_MS);
+            if (len > 0)
+            {
+                // 计算校验和
+                int checksum = 0;
+                for (int i = 0; i < pLength; i++)
+                {
+                    checksum += data[i + 3];
+                    checksum &= 0xFF;
+                    checksum = ~checksum & 0xFF;
+                }
+                // 校验和验证
+                len = uart_read_bytes(UART_PORT_NUM, data + pLength + 3, 1, 20 / portTICK_PERIOD_MS);
+                if (len > 0 && data[pLength + 3] == checksum)
+                {
+                    // 解析数据载荷
+                    parsePayload(data + 3, pLength);
+                }
+            }
+        }
+    }
+    free(data);
+    vTaskDelete(NULL);
 }
 
 void uart_task_create(void)
